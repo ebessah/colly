@@ -26,6 +26,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -476,12 +477,12 @@ func (c *Collector) PostRaw(URL string, requestData []byte) error {
 
 // PostMultipart starts a collector job by creating a Multipart POST request
 // with raw binary data.  PostMultipart also calls the previously provided callbacks
-func (c *Collector) PostMultipart(URL string, requestData map[string][]byte) error {
-	boundary := randomBoundary()
+func (c *Collector) PostMultipart(URL string, requestData map[string]io.Reader) error {
+	data, formDataContentType := createMultipartReader(requestData)
 	hdr := http.Header{}
-	hdr.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	hdr.Set("Content-Type", formDataContentType)
 	hdr.Set("User-Agent", c.UserAgent)
-	return c.scrape(URL, "POST", 1, createMultipartReader(boundary, requestData), nil, hdr, true)
+	return c.scrape(URL, "POST", 1, data, nil, hdr, true)
 }
 
 // Request starts a collector job by creating a custom HTTP request
@@ -1330,22 +1331,40 @@ func createFormReader(data map[string]string) io.Reader {
 	return strings.NewReader(form.Encode())
 }
 
-func createMultipartReader(boundary string, data map[string][]byte) io.Reader {
-	dashBoundary := "--" + boundary
+func createMultipartReader(data map[string]io.Reader) (io.Reader, string) {
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	// w := multipart.NewWriter(body)
 
-	body := []byte{}
-	buffer := bytes.NewBuffer(body)
-
-	buffer.WriteString("Content-type: multipart/form-data; boundary=" + boundary + "\n\n")
-	for contentType, content := range data {
-		buffer.WriteString(dashBoundary + "\n")
-		buffer.WriteString("Content-Disposition: form-data; name=" + contentType + "\n")
-		buffer.WriteString(fmt.Sprintf("Content-Length: %d \n\n", len(content)))
-		buffer.Write(content)
-		buffer.WriteString("\n")
+	for key, r := range data {
+		var fw io.Writer
+		var err error
+		if x, ok := r.(io.Closer); ok {
+			defer x.Close()
+		}
+		// Add an image file
+		if x, ok := r.(*os.File); ok {
+			if fw, err = w.CreateFormFile(key, x.Name()); err != nil {
+				// return
+				fmt.Print(err)
+			}
+		} else {
+			// Add other fields
+			if fw, err = w.CreateFormField(key); err != nil {
+				fmt.Print(err)
+				// return
+			}
+		}
+		if _, err = io.Copy(fw, r); err != nil {
+			// return err
+			fmt.Print(err)
+		}
 	}
-	buffer.WriteString(dashBoundary + "--\n\n")
-	return buffer
+	// Don't forget to close the multipart writer.
+	// If you don't close it, your request will be missing the terminating boundary.
+	w.Close()
+
+	return &b, w.FormDataContentType()
 }
 
 // randomBoundary was borrowed from
